@@ -1,0 +1,870 @@
+%% PATH 411: Group Assignment 3
+% main_gA3_13.m
+% Author(s): Sebastian, Lenard, Gary
+%
+% This assignment analyzes UCEC (Uterine Corpus Endometrial Carcinoma)
+% mRNA-seq data from TCGA Firebrowse containing 391 patients with 20, 502
+% genes. POLE driver mutation status, FIGO staging, MSI status, age, and
+% survival data is also included.
+%
+% POLE mutations are rare phenotypes in endometrial cancer associated with
+% favourable prognosis. This dataset has about 16 POLE-mutant and 84
+% POLE-wildtype samples, and is preprocessed, visualized with t-SNE and
+% clustering for feature selection, and run through classification models
+% to analyze trends between relevant genes and the discrimination of POLE
+% mutations.
+%
+% Process:
+%
+% 1. Samples are matched between mRNA expression and clinical data, log
+% transformed to normalize skewed distribution, quality control analyzing
+% total expression, IQR, and Pearson sample correlation is performed, along
+% with outlier detection via alpha thresholds and plot analysis for 0 IQR,
+% outlier correlation, and batch effects.
+%
+% 2. t-SNE is used for dimensionality reduction to visualize POLE-mut and
+% POLE-wt clustering patterns with Spearman distance and 13 perplexity for
+% small sample size. Baseline hierarchial clustering is performed on all
+% genes after median-centering to spot patterns, with correlation,
+% Euclidean, and Cosine distances tested along with average and complete
+% linkage.  Subset of POLE patients then undergoes feature selection,
+% comparing fscchi2, fscmrmr, relieff and 11, 15, and 20 feature thresholds
+% to determine which performs best for clustering and t-SNE, along with
+% feature importance bar plots.
+%
+% 3.The features which best balance discrimination vs. overfitting are then
+% trained with 5-fold cross validation and a 20% hold-out set with various
+% models such as neural networks, SVM, KNN, Decision Trees, etc. tested and
+% compared with accuracy, confusion matrix, precision, recall, and ROC-AUC
+% metrics.
+%
+% 4. Relevant clinical data and POLE subset patients are exported for SPSS
+% analysis with selected mRNA features, age, FIGO stage, MSI status, 
+% vital_status, days_to_death, days_to_last_follow_up, and POLE status. 
+% Pearson correlation between age and mRNAs is tested, Chi-square test for
+% association between combine FIGO stages and POLE driver mutation status,
+% along with a Kaplan-Meier survival analysis is perormed with MSI status
+% and POLE status as grouping variables and relevant censoring and time
+% variables.
+
+%% Loading and processing dataset
+
+%load('UCEC_seq.mat')
+
+% Load workspace (used for testing/experimenting below)
+% Please note this workspace is quite large as figures were also saved and
+% there was a previous OneDrive corruption so the script had to be run
+% again for 30 mins to load the correct workspace
+% Any errors in the terminal are due to figure saving, not the actual code
+
+% May take 1-3 mins to load (apologies)
+load('gA3_13_workspace.mat')
+
+% Grab gene x samples expression matrix from cell array, skipping gene
+% names and sample IDs for numeric data
+expression_matrix =  cell2mat(UCEC_RNAseq_filt(2:end, 2:end));
+
+% Grab gene names
+gene_names = UCEC_RNAseq_filt(2:end, 1);
+
+% Extract sample IDs and transpose to column vector for easier handling
+sample_ids = UCEC_RNAseq_filt(1, 2:end)'; 
+
+% Keep samples with both expression and clinical data, maintaining original
+% order of sample_ids
+[~, expression_index, clinical_index] = intersect(sample_ids, UCEC_clinical.case_submitter_id, 'stable');
+
+% Subset matrices for only matched samples for mRNA expression, sample IDs and clinical data
+expression_matrix = expression_matrix(:, expression_index);
+sample_ids = sample_ids(expression_index);
+clinical_match = UCEC_clinical(clinical_index, :);
+
+%% Initial visualization: Non-transformed data and transformed data
+
+% Dimensions for dataset reference
+n_samples = size(expression_matrix, 2);
+n_genes = size(expression_matrix, 1);
+
+% Calculate sum of all gene expression values per sample and IQR spread for
+% variability
+total_expr = sum(expression_matrix, 1);
+sample_iqr = iqr(expression_matrix, 1);
+
+% Log-transform to address right skew as most genes have low expression
+expression_replace_zeros = replaceZeros(expression_matrix, 'lowval');
+expression_log = log2(expression_replace_zeros);
+
+% Log values
+total_expr_log = sum(expression_log, 1);
+sample_iqr_log = iqr(expression_log, 1);
+
+% Boxplot for initial expression distribution (non-transformed)
+figure('Name', 'Initial QC: Distribution (Linear)', 'Position', [100 100 1200 500]);
+boxplot(expression_matrix, 'PlotStyle', 'traditional', ...
+        'Colors', 'k', 'Whisker', 1.5);
+ylabel('RSEM Normalized Expression', 'FontSize', 12);
+xlabel('Sample Index', 'FontSize', 12);
+title('UCEC mRNA-seq: Gene Expression Distribution Across Samples (Raw RSEM Scale)', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Scatterplot for total expression (non-transformed)
+[outliers_total_linear, outlier_ids_total_linear, ~, ~] = ...
+    scatterplotMarkOutliers(total_expr, ...
+                           'ColumnLabels', sample_ids', ...
+                           'PlotTitle', 'UCEC mRNA-seq Quality Control: Total Expression per Sample (Raw RSEM Scale)', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Total RSEM Normalized Counts', ...
+                           'ShowXTickLabel', false);
+
+% Scatterplot for IQR (non-transformed)
+[outliers_iqr_linear, outlier_ids_iqr_linear, ~, ~] = ...
+    scatterplotMarkOutliers(sample_iqr, ...
+                           'ColumnLabels', sample_ids', ...
+                           'PlotTitle', 'UCEC mRNA-seq Quality Control: Expression Variability per Sample (Raw RSEM Scale)', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Interquartile Range (IQR)', ...
+                           'ShowXTickLabel', false);
+
+% Boxplot for log2-transformed expression distribution
+figure('Name', 'Initial QC: Distribution (Log2)', 'Position', [100 100 1200 500]);
+boxplot(expression_log, 'PlotStyle', 'traditional', ...
+        'Colors', 'k', 'Whisker', 1.5);
+ylabel('Log2(RSEM Expression)', 'FontSize', 12);
+xlabel('Sample Index', 'FontSize', 12);
+title('UCEC mRNA-seq: Gene Expression Distribution Across Samples (Log2)', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Scatterplot for total expression (log2)
+[outliers_total_log, outlier_ids_total_log, ~, ~] = ...
+    scatterplotMarkOutliers(total_expr_log, ...
+                           'ColumnLabels', sample_ids', ...
+                           'PlotTitle', 'UCEC mRNA-seq Quality Control: Total Expression per Sample', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Total Log2(Expression)', ...
+                           'ShowXTickLabel', false);
+
+% Scatterplot for IQR (log2)
+[outliers_iqr_log, outlier_ids_iqr_log, ~, ~] = ...
+    scatterplotMarkOutliers(sample_iqr_log, ...
+                           'ColumnLabels', sample_ids', ...
+                           'PlotTitle', 'UCEC mRNA-seq Quality Control: Expression Variability per Sample', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Interquartile Range (Log2 Scale)', ...
+                           'ShowXTickLabel', false);
+
+% Histogram comparison: Non-transformed vs transformed
+figure('Name', 'Distribution Normalization Effect', 'Position', [100 100 1200 500]);
+subplot(1, 2, 1);
+histogram(expression_matrix(:), 50, 'FaceColor', 'b', 'EdgeColor', 'k');
+xlabel('RSEM Normalized Expression (Linear Scale)', 'FontSize', 12);
+ylabel('Frequency', 'FontSize', 12);
+title('Before Log2 Transformation: Right-Skewed Distribution', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+subplot(1, 2, 2);
+histogram(expression_log(:), 50, 'FaceColor', 'g', 'EdgeColor', 'k');
+xlabel('Log2(RSEM Expression)', 'FontSize', 12);
+ylabel('Frequency', 'FontSize', 12);
+title('After Log2 Transformation: Approximately Normal Distribution', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+%% QC Analysis on transformed data
+
+% Pairwise Spearman correlation between all samples, where biological
+% replicates should correlate highly on average
+correlation = SampleCorrelation(expression_log, "Spearman");
+
+% Extra tracking for alpha threshold for outlier detection 
+alpha = computeAlphaOutliers(n_samples);
+
+% Detect IQR outliers using scatterplotMarkOutliers (IQR = 0)
+[outliers_iqr, outlier_ids_iqr, low_outliers_iqr, high_outliers_iqr] = ...
+    scatterplotMarkOutliers(sample_iqr_log, ...
+                           'ColumnLabels', sample_ids', ...
+                           'PlotTitle', 'UCEC mRNA-seq Quality Control: Sample IQR', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'IQR (Log2)', ...
+                           'ShowXTickLabel', false);
+
+% Detect correlation outliers (Below threshold or less than 0.2 below samples)
+[outliers_corr, outlier_ids_corr, low_outliers_corr, high_outliers_corr] = ...
+    scatterplotMarkOutliers(correlation, ...
+                           'ColumnLabels', sample_ids', ...
+                           'PlotTitle', 'UCEC mRNA-seq Quality Control: Average Spearman Correlation', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Average Correlation', ...
+                           'ShowXTickLabel', false);
+
+outlier_zero_iqr = (sample_iqr_log == 0);
+
+% Combine all outliers where IQR = 0 or low correlation
+outliers = outliers_iqr | outliers_corr | outlier_zero_iqr;
+
+% Boolean mask for samples to keep that are not outliers
+keep_samples = ~outliers;
+
+% Remove outlliers from all data
+updated_expression_matrix = expression_log(:, keep_samples);
+updated_sample_ids = sample_ids(keep_samples);
+updated_clinical = clinical_match(keep_samples, :);
+
+% Recalculate QC metrics
+updated_correlation = SampleCorrelation(updated_expression_matrix, "Spearman");
+updated_iqr = iqr(updated_expression_matrix, 1);
+
+% Post-removal QC: Check IQR so no new outliers emerged
+[outliers_iqr_qc2, outlier_ids_iqr_qc2, low_outliers_iqr2, high_outliers_iqr2] = ...
+    scatterplotMarkOutliers(updated_iqr, ...
+                           'ColumnLabels', updated_sample_ids', ...
+                           'PlotTitle', 'UCEC Quality Control after Outlier Removal: Sample IQR', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Interquartile Range (IQR)', ...
+                           'ShowXTickLabel', false);
+
+% Post-removal QC: Check low correlation again
+[outliers_corr_qc2, outlier_ids_corr_qc2, low_outliers_corr2, high_outliers_corr2] = ...
+    scatterplotMarkOutliers(updated_correlation, ...
+                           'ColumnLabels', updated_sample_ids', ...
+                           'PlotTitle', 'UCEC Quality Control after Outlier Removal: Average Spearman Correlation', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Average Correlation', ...
+                           'ShowXTickLabel', false);
+
+% Expression distribution after outlier removal
+figure('Name', 'Post-Outlier Removal Distribution', 'Position', [100 100 1200 500]);
+boxplot(updated_expression_matrix, 'PlotStyle', 'traditional', ...
+        'Colors', 'k', 'Whisker', 1.5);
+ylabel('RSEM Normalized Expression', 'FontSize', 12);
+xlabel('Sample Index', 'FontSize', 12);
+title('UCEC mRNA-seq after Outlier Removal: Expression Distribution', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Filter lowly expressed genes with 0.90 to improve signal-to-noise ratio
+final_data = updated_expression_matrix;
+
+quantile_threshold = 0.90;
+
+low_expression_mask = MarkLowCounts(final_data, quantile_threshold);
+
+% Boolean mask to keep miRNAs not lowly expressed
+keep_genes = ~low_expression_mask;
+
+% Apply gene filtering
+expression_final = final_data(keep_genes, :);
+sample_ids_final = updated_sample_ids;
+
+% Final metrics
+final_total = sum(expression_final, 1);
+final_iqr = iqr(expression_final, 1);
+final_corr = SampleCorrelation(expression_final, 'Spearman');
+
+% Final distribution boxplot
+figure('Name', 'Final Distribution', 'Position', [100 100 1200 500]);
+boxplot(expression_final, 'PlotStyle', 'traditional', ...
+        'Colors', 'k', 'Whisker', 1.5);
+ylabel('Log2(Expression)', 'FontSize', 12);
+xlabel('Samples', 'FontSize', 12);
+title('Final Data: Expression Distribution', 'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Final IQR scatterplot
+[outliers_iqr_qc4, outlier_ids_iqr_qc4, low_outliers_iqr4, high_outliers_iqr4] = ...
+    scatterplotMarkOutliers(final_iqr, ...
+                           'ColumnLabels', sample_ids_final, ...
+                           'PlotTitle', 'Final Quality Control Sample IQR', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'IQR', ...
+                           'ShowXTickLabel', false);
+
+% Final spearman correlation scatterplot
+[outliers_corr4, outlier_ids_corr4, low_outliers_corr4, high_outliers_corr4] = ...
+    scatterplotMarkOutliers(final_corr, ...
+                           'ColumnLabels', sample_ids_final, ...
+                           'PlotTitle', 'Final Quality Control: Average Spearman Correlation', ...
+                           'xlabel', 'Sample Index', ...
+                           'ylabel', 'Average Correlation', ...
+                           'ShowXTickLabel', false);
+
+%% FEATURE SELECTION
+
+% POLE mutation variable preparation
+
+% Grab pole driver mutation from clinical data
+pole_status = updated_clinical.IsPOLEDriverMut;
+
+% Find samples with valid POLE status not missin
+valid_pole_index = ~ismissing(pole_status);
+
+% Filter all data to only sample with valid POLE mutation
+pole_status_filt = pole_status(valid_pole_index);
+pole_expression = expression_final(:, valid_pole_index);
+sample_ids_pole = sample_ids_final(valid_pole_index);
+clinical_pole = updated_clinical(valid_pole_index, :);
+
+% Counts for POLE mutation as Yes and POLE wildtype as No
+n_pole_mut = sum(strcmp(pole_status_filt, 'Yes'));
+n_pole_wt = sum(strcmp(pole_status_filt, 'No'));
+
+% Create POLE-mut/POLE-wt labels with clearer labels for readability
+pole_labels = cell(length(pole_status_filt), 1);
+pole_labels(strcmp(pole_status_filt, 'Yes')) = {'POLE-mut'};
+pole_labels(strcmp(pole_status_filt, 'No')) = {'POLE-wt'};
+
+% Update gene names to match
+gene_names_pole = gene_names(keep_genes);
+
+% Set seed for reproducibility
+rng(42);
+
+% Calculate t-SNE embeddings with Spearman distance (good for gene expression data)
+% Perplexity set to 13 to balance local/global structure given sample size
+tsne_pole = tsne(pole_expression', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+% Plot t-SNE
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_pole(:,1), tsne_pole(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE Visualization: UCEC mRNA Expression by POLE Driver Mutation Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% Median center genes for clustergrams to see relative expression of
+% up/downregulation and to remove any baseline differences between genes
+median_genes = median(pole_expression, 2);
+pole_expression_centered = pole_expression - median_genes;
+
+% Correlation distance and average linkage
+% Correlation is good for gene analysis as it measures shape similarity and
+% ignores magnitude, focusing on potential turned on/off genes; average
+% linkage is a balanced approach
+figure('Position', [100 100 1400 1200]);
+cg_baseline_corr_avg = clustergram(pole_expression_centered, ...
+    'RowLabels', gene_names_pole, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 3, ...
+    'RowPDist', 'euclidean', ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_baseline_corr_avg, 'POLE Driver Mutation Status');
+addYLabel(cg_baseline_corr_avg, 'Genes');
+addTitle(cg_baseline_corr_avg, 'Hierarchical Clustering with Correlation Distance and Average Linkage');
+
+% Euclidean distance and average linkage (standard but sensitive to
+% magnitude)
+figure('Position', [100 100 1400 1200]);
+cg_baseline_euc_avg = clustergram(pole_expression_centered, ...
+    'RowLabels', gene_names_pole, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 3, ...
+    'RowPDist', 'euclidean', ...
+    'ColumnPDist', 'euclidean', ...
+    'Linkage', 'average');
+addXLabel(cg_baseline_euc_avg, 'POLE Driver Mutation Status');
+addYLabel(cg_baseline_euc_avg, 'Genes');
+addTitle(cg_baseline_euc_avg, 'Hierarchical Clustering with Euclidean Distance and Average Linkage');
+
+% Cosine distance and complete linkage (angle similarity which is good for
+% sparse data and complete linkage may form tighter clusters)
+figure('Position', [100 100 1400 1200]);
+cg_baseline_cos_comp = clustergram(pole_expression_centered, ...
+    'RowLabels', gene_names_pole, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 3, ...
+    'RowPDist', 'euclidean', ...
+    'ColumnPDist', 'cosine', ...
+    'Linkage', 'complete');
+addXLabel(cg_baseline_cos_comp, 'POLE Driver Mutation Status');
+addYLabel(cg_baseline_cos_comp, 'Genes');
+addTitle(cg_baseline_cos_comp, 'Hierarchical Clustering with Cosine Distance and Complete Linkage');
+
+%% fscchi2
+
+% Sample x genes transpose for feature selection
+X_chi2 = pole_expression_centered';
+
+% Shift all values as non-negative data is needed >=0
+X_chi2_shift = X_chi2 - min(X_chi2(:));
+
+% Convert POLE mutation status to binary numeric where yes is 1 and no is 0
+Y_chi2 = double(strcmp(pole_status_filt, 'Yes'));
+
+% Perform selection 
+[index_chi2, scores_chi2] = fscchi2(X_chi2_shift, Y_chi2);
+
+% Line plot visualization for top 100
+figure('Position', [100, 100, 1000, 600]);
+plot(scores_chi2(index_chi2(1:100)), 'b-', 'LineWidth', 2);
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('Chi-Square Score', 'FontSize', 12);
+title('Top 100 Features with fscchi2 for POLE Driver Mutation Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Bar plot visualization for top 100
+figure('Position', [100, 100, 1000, 600]);
+bar(scores_chi2(index_chi2(1:100)), 'b');
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('Chi-Square Score', 'FontSize', 12);
+title('Top 100 Features with fscchi2 for POLE Driver Mutation Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Selecting top 11 features and grabbing relevant indices/names
+n_features_chi2 = 11;
+top_index_chi2 = index_chi2(1:n_features_chi2);
+select_features_chi2 = pole_expression_centered(top_index_chi2, :);
+selected_names_chi2 = gene_names_pole(top_index_chi2);
+
+figure('Position', [100, 100, 1000, 600]);
+bar(scores_chi2(top_index_chi2));
+xlabel('Selected Feature Index', 'FontSize', 12);
+ylabel('Chi-Square Score', 'FontSize', 12);
+title('Top 11 Selected Features with fscchi2', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+xticks(1:n_features_chi2);
+xticklabels(selected_names_chi2);
+xtickangle(45);
+grid on;
+
+% Clustering with heatmap
+figure('Position', [100 100 1400 1200]);
+cg_chi2 = clustergram(select_features_chi2, ...
+    'RowLabels', selected_names_chi2, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_chi2, 'POLE Driver Mutation Status');
+addYLabel(cg_chi2, 'Selected Genes (Chi-Square)');
+addTitle(cg_chi2, 'Hierarchical Clustering: Top 11 Features with fscchi2');
+
+% Chi-square: 15 features
+n_features_chi2_15 = 15;
+top_index_chi2_15 = index_chi2(1:n_features_chi2_15);
+select_features_chi2_15 = pole_expression_centered(top_index_chi2_15, :);
+selected_names_chi2_15 = gene_names_pole(top_index_chi2_15);
+
+figure('Position', [100 100 1400 1200]);
+cg_chi2_15 = clustergram(select_features_chi2_15, ...
+    'RowLabels', selected_names_chi2_15, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_chi2_15, 'POLE Driver Mutation Status');
+addYLabel(cg_chi2_15, 'Selected Genes (Chi-Square)');
+addTitle(cg_chi2_15, 'Hierarchical Clustering: Top 15 Features with fscchi2');
+
+% Chi-square: 20 features
+n_features_chi2_20 = 20;
+top_index_chi2_20 = index_chi2(1:n_features_chi2_20);
+select_features_chi2_20 = pole_expression_centered(top_index_chi2_20, :);
+selected_names_chi2_20 = gene_names_pole(top_index_chi2_20);
+
+figure('Position', [100 100 1400 1200]);
+cg_chi2_20 = clustergram(select_features_chi2_20, ...
+    'RowLabels', selected_names_chi2_20, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_chi2_20, 'POLE Driver Mutation Status');
+addYLabel(cg_chi2_20, 'Selected Genes (Chi-Square)');
+addTitle(cg_chi2_20, 'Hierarchical Clustering: Top 20 Features with fscchi2');
+
+%% fscmrmr
+X_mrmr = pole_expression_centered';
+
+% Shift to non-negative if needed
+X_mrmr_shift = X_mrmr - min(X_mrmr(:));
+
+% Convert POLE status to numeric for mRMR (Yes=1, No=0)
+Y_mrmr = double(strcmp(pole_status_filt, 'Yes'));
+
+% Perform mRMR feature selection
+[index_mrmr, scores_mrmr] = fscmrmr(X_mrmr_shift, Y_mrmr);
+
+% Scores are in descending order of importance
+[scores_mrmr_sorted, sort_index] = sort(scores_mrmr, 'descend');
+index_mrmr_sorted = index_mrmr(sort_index);
+
+% Plot feature importance scores for top 100 features
+figure('Position', [100, 100, 1000, 600]);
+plot(scores_mrmr_sorted(1:100), 'r-', 'LineWidth', 2);
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('mRMR Score', 'FontSize', 12);
+title('Top 100 Features with fscmrmr for POLE Driver Mutation Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Bar plot for top 100 features 
+figure('Position', [100, 100, 1000, 600]);
+bar(scores_mrmr_sorted(1:100), 'r');
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('mRMR Score', 'FontSize', 12);
+title('Top 100 Features with fscmrmr for POLE Driver Mutation Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Top 11 mRMR features
+n_features_mrmr = 11;
+top_index_mrmr = index_mrmr_sorted(1:n_features_mrmr);
+top_scores_mrmr = scores_mrmr_sorted(1:n_features_mrmr);
+selected_names_mrmr = gene_names_pole(top_index_mrmr);
+select_features_mrmr = pole_expression_centered(top_index_mrmr, :);
+
+figure('Position', [100, 100, 1000, 600]);
+bar(top_scores_mrmr);
+xlabel('Selected Feature Index', 'FontSize', 12);
+ylabel('mRMR Score', 'FontSize', 12);
+title('Top 11 Selected Features with fscmrmr', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+xticks(1:n_features_mrmr);
+xticklabels(selected_names_mrmr);
+xtickangle(45);
+grid on;
+
+figure('Position', [100 100 1400 1200]);
+cg_mrmr = clustergram(select_features_mrmr, ...
+    'RowLabels', selected_names_mrmr, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_mrmr, 'POLE Driver Mutation Status');
+addYLabel(cg_mrmr, 'Selected Genes (mRMR)');
+addTitle(cg_mrmr, 'Hierarchical Clustering: Top 11 Features with fscmrmr');
+
+% mRMR: 15 features
+n_features_mrmr_15 = 15;
+top_index_mrmr_15 = index_mrmr_sorted(1:n_features_mrmr_15);
+select_features_mrmr_15 = pole_expression_centered(top_index_mrmr_15, :);
+selected_names_mrmr_15 = gene_names_pole(top_index_mrmr_15);
+
+figure('Position', [100 100 1400 1200]);
+cg_mrmr_15 = clustergram(select_features_mrmr_15, ...
+    'RowLabels', selected_names_mrmr_15, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_mrmr_15, 'POLE Driver Mutation Status');
+addYLabel(cg_mrmr_15, 'Selected Genes (mRMR)');
+addTitle(cg_mrmr_15, 'Hierarchical Clustering: Top 15 Features with fscmrmr');
+
+% mRMR: 20 features
+n_features_mrmr_20 = 20;
+top_index_mrmr_20 = index_mrmr_sorted(1:n_features_mrmr_20);
+select_features_mrmr_20 = pole_expression_centered(top_index_mrmr_20, :);
+selected_names_mrmr_20 = gene_names_pole(top_index_mrmr_20);
+
+figure('Position', [100 100 1400 1200]);
+cg_mrmr_20 = clustergram(select_features_mrmr_20, ...
+    'RowLabels', selected_names_mrmr_20, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_mrmr_20, 'POLE Driver Mutation Status');
+addYLabel(cg_mrmr_20, 'Selected Genes (mRMR)');
+addTitle(cg_mrmr_20, 'Hierarchical Clustering: Top 20 Features with fscmrmr');
+
+%% ReliefF Feature Selection
+
+% Prepare data for ReliefF (samples × features)
+X_relief = pole_expression_centered';
+
+% Convert POLE status to numeric for ReliefF (Yes=1, No=0)
+Y_relief = double(strcmp(pole_status_filt, 'Yes'));
+
+% Relieff
+[index_relief, weights_relief] = relieff(X_relief, Y_relief, 10);
+
+scores_relief_sorted = weights_relief(index_relief);
+index_relief_sorted = index_relief;
+
+% Plot feature importance weights for top 100 features
+figure('Position', [100, 100, 1000, 600]);
+plot(scores_relief_sorted(1:100), 'g-', 'LineWidth', 2);
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('ReliefF Weight', 'FontSize', 12);
+title('Top 100 Features with ReliefF for POLE Driver Mutation Status', ...
+    'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Bar plot for top 100 features 
+figure('Position', [100, 100, 1000, 600]);
+bar(scores_relief_sorted(1:100), 'g');
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('ReliefF Weight', 'FontSize', 12);
+title('Top 100 Features: ReliefF Weights (Bar Plot)', ...
+    'FontSize', 14, 'FontWeight', 'bold');
+grid on;
+
+% Select top N features
+n_features_relief = 11;
+top_index_relief = index_relief_sorted(1:n_features_relief);
+top_scores_relief = scores_relief_sorted(1:n_features_relief);
+selected_names_relief = gene_names_pole(top_index_relief);
+
+% Extract selected features (use centered data for clustering visualization)
+select_features_relief = pole_expression_centered(top_index_relief, :);
+
+figure('Position', [100, 100, 1000, 600]);
+bar(top_scores_relief);
+xlabel('Feature Rank', 'FontSize', 12);
+ylabel('ReliefF Weight', 'FontSize', 12);
+title('Top 11 Selected Features with ReliefF', ...
+    'FontSize', 14, 'FontWeight', 'bold');
+xticks(1:n_features_relief);
+xticklabels(selected_names_relief);
+xtickangle(45);
+grid on;
+
+% Hierarchical clustering with selected features
+figure('Position', [100 100 1400 1200]);
+cg_relief = clustergram(select_features_relief, ...
+    'RowLabels', selected_names_relief, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_relief, 'POLE Driver Mutation Status');
+addYLabel(cg_relief, 'Selected Genes (ReliefF)');
+addTitle(cg_relief, 'Hierarchical Clustering: Top 11 Features with ReliefF');
+
+% ReliefF: 15 features
+n_features_relief_15 = 15;
+top_index_relief_15 = index_relief_sorted(1:n_features_relief_15);
+select_features_relief_15 = pole_expression_centered(top_index_relief_15, :);
+selected_names_relief_15 = gene_names_pole(top_index_relief_15);
+
+figure('Position', [100 100 1400 1200]);
+cg_relief_15 = clustergram(select_features_relief_15, ...
+    'RowLabels', selected_names_relief_15, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_relief_15, 'POLE Driver Mutation Status');
+addYLabel(cg_relief_15, 'Selected Genes (ReliefF)');
+addTitle(cg_relief_15, 'Hierarchical Clustering: Top 15 Features with ReliefF');
+
+% ReliefF: 20 features
+n_features_relief_20 = 20;
+top_index_relief_20 = index_relief_sorted(1:n_features_relief_20);
+select_features_relief_20 = pole_expression_centered(top_index_relief_20, :);
+selected_names_relief_20 = gene_names_pole(top_index_relief_20);
+
+figure('Position', [100 100 1400 1200]);
+cg_relief_20 = clustergram(select_features_relief_20, ...
+    'RowLabels', selected_names_relief_20, ...
+    'ColumnLabels', pole_labels, ...
+    'Colormap', redbluecmap, ...
+    'DisplayRange', 4, ...
+    'ColumnPDist', 'correlation', ...
+    'Linkage', 'average');
+addXLabel(cg_relief_20, 'POLE Driver Mutation Status');
+addYLabel(cg_relief_20, 'Selected Genes (ReliefF)');
+addTitle(cg_relief_20, 'Hierarchical Clustering: Top 20 Features with ReliefF');
+
+%% t-SNE visualization after cluster selection to see if clustering patterns have improved
+
+% Chi-Square Feature Selection t-SNE
+
+% 11 features
+tsne_chi2_11 = tsne(select_features_chi2', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_chi2_11(:,1), tsne_chi2_11(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 11 Chi-Square Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% 15 features
+tsne_chi2_15 = tsne(select_features_chi2_15', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_chi2_15(:,1), tsne_chi2_15(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 15 Chi-Square Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% 20 features
+tsne_chi2_20 = tsne(select_features_chi2_20', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_chi2_20(:,1), tsne_chi2_20(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 20 Chi-Square Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% mRMR Feature Selection t-SNE
+
+% 11 features
+tsne_mrmr_11 = tsne(select_features_mrmr', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_mrmr_11(:,1), tsne_mrmr_11(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 11 mRMR Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% 15 features
+tsne_mrmr_15 = tsne(select_features_mrmr_15', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_mrmr_15(:,1), tsne_mrmr_15(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 15 mRMR Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% 20 features
+tsne_mrmr_20 = tsne(select_features_mrmr_20', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_mrmr_20(:,1), tsne_mrmr_20(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 20 mRMR Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% ReliefF Feature Selection t-SNE
+
+% 11 features
+tsne_relief_11 = tsne(select_features_relief', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_relief_11(:,1), tsne_relief_11(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 11 ReliefF Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% 15 features
+tsne_relief_15 = tsne(select_features_relief_15', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_relief_15(:,1), tsne_relief_15(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 15 ReliefF Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+% 20 features
+tsne_relief_20 = tsne(select_features_relief_20', ...
+    'Algorithm', 'barneshut', ...
+    'Distance', 'spearman', ...
+    'Perplexity', 13);
+
+figure('Position', [100, 100, 900, 700]);
+gscatter(tsne_relief_20(:,1), tsne_relief_20(:,2), pole_labels, ...
+         [0.8 0.2 0.2; 0.2 0.4 0.8], 'o', 8, 'filled');
+xlabel('t-SNE Dimension 1', 'FontSize', 12);
+ylabel('t-SNE Dimension 2', 'FontSize', 12);
+title('t-SNE: Top 20 ReliefF Features for POLE Status', ...
+      'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+
+%% Prepare and export data for classification and SPSS
+
+% Extract strongest relieff features and transpose for samples x features
+X_classification_relief = select_features_relief'; 
+
+% Create POLE status labels as categorical variable
+POLEStatus_relief = categorical(pole_status_filt);
+
+% Create classification table with gene names as column headers and POLE
+% status as target variable
+ClassificationTable_relief = array2table(X_classification_relief, 'VariableNames', selected_names_relief);
+ClassificationTable_relief.POLEStatus = POLEStatus_relief;
+
+% Extract original non-centered data for SPSS
+expression_relief = pole_expression(top_index_relief, :)';  
+
+% Create SPSS table with gene names
+SPSS_table_relief = array2table(expression_relief, 'VariableNames', selected_names_relief);
+
+% Add clinical variables for Q4, Q5, Q6
+SPSS_table_relief.age = clinical_pole.age_at_index;
+SPSS_table_relief.stage = clinical_pole.figo_stage;  
+SPSS_table_relief.MSI_status = clinical_pole.MSI;     
+SPSS_table_relief.POLE_status = pole_status_filt;
+SPSS_table_relief.vital_status = clinical_pole.vital_status;
+SPSS_table_relief.days_to_death = clinical_pole.days_to_death;
+SPSS_table_relief.days_to_last_followup = clinical_pole.days_to_last_follow_up;
+SPSS_table_relief.sample_id = sample_ids_pole;
+
+% Export to Excel
+writetable(SPSS_table_relief, 'UCEC_SPSS_ReliefF_11features.xlsx');

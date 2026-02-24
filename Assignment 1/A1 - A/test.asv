@@ -1,0 +1,10 @@
+% Load the assignment data
+load("ForMiniAssignments.mat");
+
+% Cell array case
+cell_datain = cell2mat(celldata_ICGCdata_norm(3:end, 2:end));
+cellRes = SampleNormalizationRF(cell_datain);
+
+% --- Table case
+tbl_datain = tbl_ICGCdata_norm{:, 2:end};
+TableRes = SampleNormalizationRF(cell2mat(tbl_datain));
